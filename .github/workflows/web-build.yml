@@ -1,0 +1,67 @@
+name: Web Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        required: true
+        type: string
+      build_type:
+        required: true
+        type: string
+      build_tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download ZIP
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p input project
+          curl -fL --retry 5 --retry-delay 3 --connect-timeout 30 \
+            --max-time 1800 -o input/project.zip "${{ inputs.zip_url }}"
+          test "$(stat -c%s input/project.zip)" -le 2147483648
+          unzip -q input/project.zip -d project
+          shopt -s dotglob
+          items=(project/*)
+          if [ ${#items[@]} -eq 1 ] && [ -d "${items[0]}" ]; then
+            inner="${items[0]}"
+            cp -a "$inner"/. project/
+            rm -rf "$inner"
+          fi
+
+      - name: Detect web project
+        shell: bash
+        run: |
+          set -euxo pipefail
+          if [ -f project/package.json ]; then
+            cd project
+            npm install
+            if node -e "let p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)"; then
+              npm run build
+            fi
+          fi
+
+      - name: Package web
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf project/node_modules
+          zip -9 -r web-result.zip project
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-${{ inputs.build_tag }}
+          path: web-result.zip
+          retention-days: 1
