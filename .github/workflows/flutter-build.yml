@@ -1,0 +1,100 @@
+name: Flutter Builder
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        required: true
+        type: string
+      build_type:
+        required: true
+        type: choice
+        options: [release, debug]
+      build_tag:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout builder
+        uses: actions/checkout@v5
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Download project ZIP
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p input
+          curl -fL --retry 5 --retry-delay 3 --connect-timeout 30 \
+            --max-time 1800 -o input/project.zip "${{ inputs.zip_url }}"
+          ls -lh input/project.zip
+          test "$(stat -c%s input/project.zip)" -le 2147483648
+
+      - name: Extract project
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p project
+          unzip -q input/project.zip -d project
+          shopt -s dotglob
+          items=(project/*)
+          if [ ${#items[@]} -eq 1 ] && [ -d "${items[0]}" ]; then
+            inner="${items[0]}"
+            cp -a "$inner"/. project/
+            rm -rf "$inner"
+          fi
+          test -f project/pubspec.yaml
+          cd project
+          flutter --version
+          flutter pub get
+
+      - name: Build Flutter
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd project
+          if [ "${{ inputs.build_type }}" = "debug" ]; then
+            flutter build apk --debug --verbose 2>&1 | tee ../build.log
+          else
+            flutter build apk --release --verbose 2>&1 | tee ../build.log
+          fi
+
+      - name: Package APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p output
+          find project/build/app/outputs -type f -name "*.apk" -print -exec cp {} output/ \;
+          test -n "$(find output -type f -name '*.apk' -print -quit)"
+          cp build.log output/build.log
+          cd output
+          zip -9 -r ../flutter-result.zip .
+
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-${{ inputs.build_type }}-${{ inputs.build_tag }}
+          path: flutter-result.zip
+          retention-days: 1
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ inputs.build_tag }}
+          path: |
+            build.log
+            project/build/app/outputs/**/*.log
+          if-no-files-found: ignore
+          retention-days: 1
